@@ -9,6 +9,8 @@ Turbo Spoon
 Usage:
   #{__FILE__} update <zone> <name>...
   #{__FILE__} daemon
+  #{__FILE__} -h
+  #{__FILE__} --version
 
 Options:
   -h --help               Show this screen.
@@ -43,7 +45,7 @@ end
 
 def main
   begin
-    opts = Docopt::docopt(DOC)
+    opts = Docopt::docopt(DOC, version: 'master')
     if opts['daemon']
       daemon
     end
