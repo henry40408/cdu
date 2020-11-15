@@ -33,10 +33,18 @@ def daemon
   end
 end
 
+def current_ip_address
+  begin
+    Faraday.get('https://checkip.amazonaws.com/').body
+  rescue Faraday::ConnectionFailed,SocketError
+    Faraday.get('https://api.ipify.org/').body
+  end
+end
+
 def update(zone, record_names, verbose: false)
-  ip_address = Faraday.get('https://api.ipify.org/').body
   updater = RecordUpdater.new(token: ENV.fetch('CLOUDFLARE_TOKEN'), zone: zone)
   
+  ip_address = current_ip_address.strip
   records = updater.update_many(record_names.map(&:strip), ip_address)
   records.each do |record|
     LOGGER.info "#{record[:name]}: #{ip_address}"
