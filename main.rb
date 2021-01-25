@@ -1,6 +1,8 @@
 require 'docopt'
 require 'faraday'
 require 'logger'
+require 'retries'
+
 require_relative 'record_updater'
 
 DOC = <<DOCOPT
@@ -27,9 +29,11 @@ def daemon
 
   LOGGER.info 'daemon mode, update records for the first time'
   loop do
-    update(zone, record_names, verbose: true)
-    LOGGER.info "sleep #{delay} seconds"
-    sleep delay
+    with_retries(max_tries: 3) do
+      update(zone, record_names, verbose: true)
+      LOGGER.info "sleep #{delay} seconds"
+      sleep delay
+    end
   end
 end
 

@@ -37,6 +37,7 @@ GEM
     protocol-http2 (0.14.1)
       protocol-hpack (~> 1.4)
       protocol-http (~> 0.18)
+    retries (0.0.5)
     ruby2_keywords (0.0.2)
     timers (4.3.2)
 
@@ -47,6 +48,7 @@ DEPENDENCIES
   cloudflare
   docopt
   faraday
+  retries
 
 BUNDLED WITH
    2.1.4
