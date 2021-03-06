@@ -8,5 +8,10 @@ description = "A daemon and CLI to update DNS records on Cloudflare"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.38"
 cloudflare-rs = "0.6.6"
+log = "0.4.14"
+pretty_env_logger = "0.4.0"
+public-ip = "0.2.0"
 structopt = "0.3.21"
+tokio = { version = "1.2.0", features = ["macros"] }
