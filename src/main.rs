@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use anyhow::bail;
 use cloudflare::endpoints::{dns, zone};
@@ -9,8 +10,9 @@ use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
 use cloudflare::framework::apiclient::ApiClient;
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::response::ApiSuccess;
-use log::debug;
+use log::{debug, info};
 use structopt::StructOpt;
+use tokio::time;
 
 #[derive(StructOpt)]
 #[structopt(about, author)]
@@ -29,7 +31,14 @@ struct Opts {
     #[structopt(long, help = "Debug mode")]
     debug: bool,
     #[structopt(short, long, help = "Daemon mode")]
-    daemon: Option<u64>,
+    daemon: bool,
+    #[structopt(
+        short,
+        long,
+        help = "Interval in seconds. Only in effect in daemon mode",
+        default_value = "60"
+    )]
+    interval: u64,
 }
 
 #[tokio::main]
@@ -54,9 +63,25 @@ async fn main() -> anyhow::Result<()> {
     };
     let cf_client = CFClient::new(params)?;
 
-    run_once(&cf_client).await?;
+    if opts.daemon {
+        run_daemon(&cf_client, opts.interval).await?;
+    } else {
+        run_once(&cf_client).await?;
+    }
 
     Ok(())
+}
+
+async fn run_daemon(cf_client: &CFClient, seconds: u64) -> anyhow::Result<()> {
+    info!("daemon starts, update for the first time");
+
+    loop {
+        info!("update DNS records");
+        run_once(cf_client).await?;
+        info!("done");
+        info!("wait for {0} seconds", seconds);
+        time::sleep(Duration::from_secs(seconds)).await;
+    }
 }
 
 async fn run_once(cf_client: &CFClient) -> anyhow::Result<()> {
