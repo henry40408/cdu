@@ -1,6 +1,6 @@
 # Turbo Spoon
 
-Turbo Spoon is an daemon and CLI to update DNS record on Cloudflare.
+Turbo Spoon is a daemon and CLI to update DNS records on Cloudflare.
 
 ## Usage
 
