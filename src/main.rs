@@ -1,14 +1,15 @@
 #[forbid(unsafe_code)]
-use anyhow::bail;
-use cloudflare::endpoints::{dns, zone};
-use cloudflare::framework::apiclient::ApiClient;
-use cloudflare::framework::auth::Credentials;
-use cloudflare::framework::response::ApiSuccess;
-use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
-use log::debug;
 use std::collections::HashMap;
 use std::env;
 use std::net::Ipv4Addr;
+
+use anyhow::bail;
+use cloudflare::endpoints::{dns, zone};
+use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
+use cloudflare::framework::apiclient::ApiClient;
+use cloudflare::framework::auth::Credentials;
+use cloudflare::framework::response::ApiSuccess;
+use log::debug;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -25,8 +26,10 @@ struct Opts {
         env = "CLOUDFLARE_RECORDS"
     )]
     records: String,
-    #[structopt(short, long, help = "Dry run")]
-    dry_run: bool,
+    #[structopt(long, help = "Debug mode")]
+    debug: bool,
+    #[structopt(short, long, help = "Daemon mode")]
+    daemon: Option<u64>,
 }
 
 #[tokio::main]
@@ -34,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::from_args();
 
     if env::var_os("RUST_LOG").is_none() {
-        if opts.dry_run {
+        if opts.debug {
             env::set_var("RUST_LOG", "turbo_spoon=debug");
         } else {
             env::set_var("RUST_LOG", "turbo_spoon=info");
@@ -43,6 +46,20 @@ async fn main() -> anyhow::Result<()> {
 
     pretty_env_logger::init();
 
+    let record_names: Vec<_> = opts.records.split(",").map(String::from).collect();
+    let params = CFClientParams {
+        token: opts.token,
+        zone_name: opts.zone,
+        record_names,
+    };
+    let cf_client = CFClient::new(params)?;
+
+    run_once(&cf_client).await?;
+
+    Ok(())
+}
+
+async fn run_once(cf_client: &CFClient) -> anyhow::Result<()> {
     let ip_address = match public_ip::addr_v4().await {
         Some(ip_address) => ip_address,
         None => bail!("failed to determine public IPv4 address"),
@@ -50,34 +67,11 @@ async fn main() -> anyhow::Result<()> {
 
     debug!("public IPv4 address: {0}", &ip_address);
 
-    let creds = Credentials::UserAuthToken { token: opts.token };
-    let client = match HttpApiClient::new(
-        creds,
-        HttpApiClientConfig::default(),
-        Environment::Production,
-    ) {
-        Ok(client) => client,
-        Err(_e) => bail!("failed to initialize Cloudflare client"),
-    };
-    let my_client = MyClient(client);
-
-    let zone_id = my_client.zone_name_to_id(&opts.zone)?;
-    debug!("zone {0} (id: {1}) found", &opts.zone, &zone_id);
-
-    let record_names: Vec<_> = opts.records.split(",").map(String::from).collect();
-    let record_map = my_client.record_names_to_ids(zone_id.clone(), record_names)?;
-    for (ref record_name, ref record_id) in &record_map {
-        debug!(
-            "DNS record {2} (id: {3}) found in {0} (id: {1})",
-            opts.zone, zone_id, record_name, record_id
-        )
-    }
-
-    let results = my_client.update_dns_records(&zone_id, &record_map, &ip_address)?;
+    let results = cf_client.update_dns_records(&ip_address)?;
     for result in results {
         match result.content {
             dns::DnsContent::A { ref content } => {
-                debug!("DNS record {0} is changed to {1}", result.name, content)
+                debug!("DNS record {0} refers to {1}", result.name, content)
             }
             _ => (),
         }
@@ -86,17 +80,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-struct MyClient(HttpApiClient);
+struct CFClientParams {
+    token: String,
+    zone_name: String,
+    record_names: Vec<String>,
+}
 
-impl MyClient {
+struct CFClient {
+    params: CFClientParams,
+    client: HttpApiClient,
+}
+
+impl CFClient {
+    fn new(params: CFClientParams) -> anyhow::Result<Self> {
+        let creds = Credentials::UserAuthToken {
+            token: params.token.clone(),
+        };
+        let client = match HttpApiClient::new(
+            creds,
+            HttpApiClientConfig::default(),
+            Environment::Production,
+        ) {
+            Ok(client) => client,
+            Err(_e) => bail!("failed to initialize Cloudflare client"),
+        };
+        Ok(Self { params, client })
+    }
+
     fn record_names_to_ids<S: AsRef<str>>(
         &self,
         zone_id: S,
-        record_names: Vec<String>,
     ) -> anyhow::Result<HashMap<String, String>> {
         let mut record_map: HashMap<String, String> = HashMap::new();
 
-        for record_name in record_names {
+        for record_name in &self.params.record_names {
             let params = dns::ListDnsRecords {
                 zone_identifier: zone_id.as_ref(),
                 params: dns::ListDnsRecordsParams {
@@ -110,7 +127,7 @@ impl MyClient {
                 },
             };
 
-            let result: ApiSuccess<Vec<dns::DnsRecord>> = self.0.request(&params)?;
+            let result: ApiSuccess<Vec<dns::DnsRecord>> = self.client.request(&params)?;
             let record_id = match result.result.first() {
                 Some(dns_record) => dns_record.id.clone(),
                 None => bail!("DNS record {0} does not exist", record_name),
@@ -121,12 +138,18 @@ impl MyClient {
         Ok(record_map)
     }
 
-    fn update_dns_records<S: AsRef<str>>(
-        &self,
-        zone_id: S,
-        record_map: &HashMap<String, String>,
-        ip_address: &Ipv4Addr,
-    ) -> anyhow::Result<Vec<dns::DnsRecord>> {
+    fn update_dns_records(&self, ip_address: &Ipv4Addr) -> anyhow::Result<Vec<dns::DnsRecord>> {
+        let zone_id = self.zone_name_to_id(&self.params.zone_name)?;
+        debug!("zone {0} (id: {1}) found", &self.params.zone_name, &zone_id);
+
+        let record_map = self.record_names_to_ids(&zone_id)?;
+        for (ref record_name, ref record_id) in &record_map {
+            debug!(
+                "DNS record {2} (id: {3}) found in {0} (id: {1})",
+                self.params.zone_name, zone_id, record_name, record_id
+            )
+        }
+
         let mut results = vec![];
 
         for (ref record_name, ref record_id) in record_map {
@@ -143,7 +166,7 @@ impl MyClient {
                 },
             };
 
-            let result: ApiSuccess<dns::DnsRecord> = self.0.request(&params)?;
+            let result: ApiSuccess<dns::DnsRecord> = self.client.request(&params)?;
             results.push(result.result);
         }
 
@@ -163,7 +186,7 @@ impl MyClient {
                 search_match: None,
             },
         };
-        let result: ApiSuccess<Vec<zone::Zone>> = self.0.request(&params)?;
+        let result: ApiSuccess<Vec<zone::Zone>> = self.client.request(&params)?;
         match result.result.first() {
             Some(zone) => Ok(zone.id.clone()),
             None => bail!("zone {0} does not exist", zone_name),
