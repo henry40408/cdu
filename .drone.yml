@@ -19,9 +19,8 @@ steps:
       mount:
         - target
   - name: check-test-build
-    image: rust:1.49.0-alpine
+    image: ekidd/rust-musl-builder:1.49.0
     commands:
-      - apk add --no-cache musl-dev openssl-dev
       - cargo check
       - cargo test
       - cargo build --release --target x86_64-unknown-linux-musl
