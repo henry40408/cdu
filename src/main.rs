@@ -5,12 +5,10 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::bail;
-use cloudflare::endpoints::{dns, zone};
-use cloudflare::framework::apiclient::ApiClient;
-use cloudflare::framework::auth::Credentials;
-use cloudflare::framework::response::ApiSuccess;
-use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
 use log::{debug, info};
+use reqwest::{Client, header};
+use serde::Deserialize;
+use serde_json::json;
 use structopt::StructOpt;
 use tokio::time;
 
@@ -92,18 +90,15 @@ async fn run_once(cf_client: &CFClient) -> anyhow::Result<()> {
 
     debug!("public IPv4 address: {0}", &ip_address);
 
-    let results = cf_client.update_dns_records(&ip_address)?;
+    let results = cf_client.update_dns_records(&ip_address).await?;
     for result in results {
-        match result.content {
-            dns::DnsContent::A { ref content } => {
-                debug!("DNS record {0} refers to {1}", result.name, content)
-            }
-            _ => (),
-        }
+        debug!("DNS record {0} refers to {1}", result.name, result.content);
     }
 
     Ok(())
 }
+
+const CLOUDFLARE_API: &'static str = "https://api.cloudflare.com/client/v4";
 
 struct CFClientParams {
     token: String,
@@ -113,47 +108,69 @@ struct CFClientParams {
 
 struct CFClient {
     params: CFClientParams,
-    client: HttpApiClient,
+    client: Client,
+}
+
+#[derive(Deserialize)]
+struct DnsRecord {
+    id: String,
+    name: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct DnsRecords {
+    result: Vec<DnsRecord>,
+}
+
+#[derive(Deserialize)]
+struct UpdateDnsRecord {
+    result: DnsRecord,
+}
+
+#[derive(Deserialize)]
+struct Zone {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct Zones {
+    result: Vec<Zone>,
 }
 
 impl CFClient {
     fn new(params: CFClientParams) -> anyhow::Result<Self> {
-        let creds = Credentials::UserAuthToken {
-            token: params.token.clone(),
-        };
-        let client = match HttpApiClient::new(
-            creds,
-            HttpApiClientConfig::default(),
-            Environment::Production,
-        ) {
-            Ok(client) => client,
-            Err(_e) => bail!("failed to initialize Cloudflare client"),
-        };
+        let mut headers = header::HeaderMap::new();
+
+        let authorization = format!("Bearer {0}", &params.token);
+        let mut authorization = header::HeaderValue::from_str(&authorization)?;
+        authorization.set_sensitive(true);
+        headers.insert(header::AUTHORIZATION, authorization);
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
         Ok(Self { params, client })
     }
 
-    fn record_names_to_ids<S: AsRef<str>>(
+    async fn record_names_to_ids<S: AsRef<str>>(
         &self,
         zone_id: S,
     ) -> anyhow::Result<HashMap<String, String>> {
+        let zone_id = zone_id.as_ref();
         let mut record_map: HashMap<String, String> = HashMap::new();
 
         for record_name in &self.params.record_names {
-            let params = dns::ListDnsRecords {
-                zone_identifier: zone_id.as_ref(),
-                params: dns::ListDnsRecordsParams {
-                    record_type: None,
-                    name: Some(record_name.clone()),
-                    page: None,
-                    per_page: None,
-                    order: None,
-                    direction: None,
-                    search_match: None,
-                },
-            };
-
-            let result: ApiSuccess<Vec<dns::DnsRecord>> = self.client.request(&params)?;
-            let record_id = match result.result.first() {
+            let url = format!("{0}/zones/{1}/dns_records", CLOUDFLARE_API, zone_id);
+            let res: DnsRecords = self
+                .client
+                .get(&url)
+                .query(&[("name", record_name)])
+                .send()
+                .await?
+                .json()
+                .await?;
+            let record_id = match res.result.first() {
                 Some(dns_record) => dns_record.id.clone(),
                 None => bail!("DNS record {0} does not exist", record_name),
             };
@@ -163,11 +180,11 @@ impl CFClient {
         Ok(record_map)
     }
 
-    fn update_dns_records(&self, ip_address: &Ipv4Addr) -> anyhow::Result<Vec<dns::DnsRecord>> {
-        let zone_id = self.zone_name_to_id(&self.params.zone_name)?;
+    async fn update_dns_records(&self, ip_address: &Ipv4Addr) -> anyhow::Result<Vec<DnsRecord>> {
+        let zone_id = self.zone_name_to_id(&self.params.zone_name).await?;
         debug!("zone {0} (id: {1}) found", &self.params.zone_name, &zone_id);
 
-        let record_map = self.record_names_to_ids(&zone_id)?;
+        let record_map = self.record_names_to_ids(&zone_id).await?;
         for (ref record_name, ref record_id) in &record_map {
             debug!(
                 "DNS record {2} (id: {3}) found in {0} (id: {1})",
@@ -178,41 +195,42 @@ impl CFClient {
         let mut results = vec![];
 
         for (ref record_name, ref record_id) in record_map {
-            let params = dns::UpdateDnsRecord {
-                zone_identifier: zone_id.as_ref(),
-                identifier: record_id,
-                params: dns::UpdateDnsRecordParams {
-                    ttl: None,
-                    proxied: None,
-                    name: record_name,
-                    content: dns::DnsContent::A {
-                        content: ip_address.clone(),
-                    },
-                },
-            };
-
-            let result: ApiSuccess<dns::DnsRecord> = self.client.request(&params)?;
-            results.push(result.result);
+            let url = format!(
+                "{0}/zones/{1}/dns_records/{2}",
+                CLOUDFLARE_API, zone_id, record_id
+            );
+            let json = json!({
+                "type": "A",
+                "name": record_name,
+                "content": ip_address,
+                "ttl": 1, // = automatic
+            });
+            let res: UpdateDnsRecord = self
+                .client
+                .put(&url)
+                .json(&json)
+                .send()
+                .await?
+                .json()
+                .await?;
+            results.push(res.result);
         }
 
         Ok(results)
     }
 
-    fn zone_name_to_id<S: AsRef<str>>(&self, zone_name: S) -> anyhow::Result<String> {
+    async fn zone_name_to_id<S: AsRef<str>>(&self, zone_name: S) -> anyhow::Result<String> {
         let zone_name = zone_name.as_ref();
-        let params = zone::ListZones {
-            params: zone::ListZonesParams {
-                name: Some(zone_name.to_string()),
-                status: None,
-                page: None,
-                per_page: None,
-                order: None,
-                direction: None,
-                search_match: None,
-            },
-        };
-        let result: ApiSuccess<Vec<zone::Zone>> = self.client.request(&params)?;
-        match result.result.first() {
+        let url = format!("{0}/zones", CLOUDFLARE_API);
+        let res: Zones = self
+            .client
+            .get(&url)
+            .query(&[("name", zone_name)])
+            .send()
+            .await?
+            .json()
+            .await?;
+        match res.result.first() {
             Some(zone) => Ok(zone.id.clone()),
             None => bail!("zone {0} does not exist", zone_name),
         }
