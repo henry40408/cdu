@@ -13,7 +13,7 @@ $ make build-docker-image
 $ docker run -it \
   -e CLOUDFLARE_TOKEN=[your Cloudflare token] \
   -e CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
-  -e CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare, separated by comma] \
+  -e CLOUDFLARE_RECORDS=[name of DNS records on Cloudflare, separated by comma] \
   henry40408/turbo-spoon \
   /turbo-spoon
 ```
@@ -23,7 +23,7 @@ Run directly:
 ```bash
 CLOUDFLARE_TOKEN=[your Cloudflare token] \
 CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
-CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare, separated by comma] \
+CLOUDFLARE_RECORDS=[name of DNS records on Cloudflare, separated by comma] \
 cargo run -d
 ```
 
@@ -32,7 +32,7 @@ Run once:
 ```bash
 CLOUDFLARE_TOKEN=[your Cloudflare token] \
 CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
-CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare, separated by comma] \
+CLOUDFLARE_RECORDS=[name of DNS records on Cloudflare, separated by comma] \
 cargo run
 ```
 
