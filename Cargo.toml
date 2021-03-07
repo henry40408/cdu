@@ -9,10 +9,12 @@ description = "A daemon and CLI to update DNS records on Cloudflare"
 
 [dependencies]
 anyhow = "1.0.38"
-cloudflare-rs = "0.6.6"
 log = "0.4.14"
 pretty_env_logger = "0.4.0"
 public-ip = { version = "0.2.0", default-features = false, features = ["google", "opendns", "tokio-dns-resolver"] }
+reqwest = { version = "0.11.1", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1.0.124", features = ["derive"] }
+serde_json = "1.0.64"
 structopt = "0.3.21"
 tokio = { version = "1.2.0", features = ["macros", "rt-multi-thread"] }
 
