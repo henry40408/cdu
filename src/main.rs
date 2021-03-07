@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use anyhow::bail;
 use cloudflare::endpoints::{dns, zone};
-use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
 use cloudflare::framework::apiclient::ApiClient;
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::response::ApiSuccess;
+use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
 use log::{debug, info};
 use structopt::StructOpt;
 use tokio::time;
@@ -30,7 +30,7 @@ struct Opts {
     records: String,
     #[structopt(long, help = "Debug mode")]
     debug: bool,
-    #[structopt(short, long, help = "Daemon mode")]
+    #[structopt(short, long, help = "Daemon mode", env = "DAEMON")]
     daemon: bool,
     #[structopt(
         short,
