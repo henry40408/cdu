@@ -7,34 +7,37 @@ Turbo Spoon is a daemon and CLI to update DNS records on Cloudflare.
 Run as Docker container:
 
 ```bash
-$ docker build -t henry40408/turbo-spoon .
+$ make build-docker-image
 $ docker run -it \
   -e CLOUDFLARE_TOKEN=[your Cloudflare token] \
   -e CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
-  -e CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare] \
-  henry40408/turbo-spoon
+  -e CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare, separated by comma] \
+  henry40408/turbo-spoon \
+  /turbo-spoon
 ```
 
 Run directly:
 
 ```bash
-$ bundle
-$ CLOUDFLARE_TOKEN=[your Cloudflare token] \
-  CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
-  CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare] \
-  ruby main.rb daemon
+CLOUDFLARE_TOKEN=[your Cloudflare token] \
+CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
+CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare, separated by comma] \
+cargo run -d
 ```
 
 Run once:
 
 ```bash
-CLOUDFLARE_TOKEN=[your Cloudflare token] ruby main.rb update [name of your zone on Cloudflare] [name of DNS records on Cloudflare]
+CLOUDFLARE_TOKEN=[your Cloudflare token] \
+CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
+CLOUDFLARE_RECORD_NAMES=[name of DNS records on Cloudflare, separated by comma] \
+cargo run
 ```
 
-For documentation:
+For help:
 
 ```bash
-ruby main.rb -h
+cargo run -- -h
 ```
 
 ## Contributing
