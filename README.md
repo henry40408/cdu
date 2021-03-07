@@ -1,5 +1,7 @@
 # Turbo Spoon
 
+[![Build Status](https://ci.h08.io/api/badges/henry40408/turbo-spoon/status.svg)](https://ci.h08.io/henry40408/turbo-spoon)
+
 Turbo Spoon is a daemon and CLI to update DNS records on Cloudflare.
 
 ## Usage
