@@ -1,0 +1,22 @@
+[package]
+name = "turbo-spoon"
+version = "0.1.0"
+authors = ["Heng-Yi Wu <2316687+henry40408@users.noreply.github.com>"]
+edition = "2018"
+description = "A daemon and CLI to update DNS records on Cloudflare"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.38"
+cloudflare-rs = "0.6.6"
+log = "0.4.14"
+pretty_env_logger = "0.4.0"
+public-ip = { version = "0.2.0", default-features = false, features = ["tokio-dns-resolver"] }
+structopt = "0.3.21"
+tokio = { version = "1.2.0", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+lto = true
+opt-level = "z"
+panic = "abort"
