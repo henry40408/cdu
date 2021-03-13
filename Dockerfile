@@ -1,7 +1,5 @@
-FROM alpine:3
+FROM scratch
 
-RUN apk add --no-cache ca-certificates
+COPY target/x86_64-unknown-linux-musl/release/cdu /
 
-COPY target/x86_64-unknown-linux-musl/release/turbo-spoon /
-
-CMD ["/turbo-spoon"]
+CMD ["/cdu"]

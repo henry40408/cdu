@@ -1,8 +1,8 @@
-# Turbo Spoon
+# cdu
 
-[![Build Status](https://ci.h08.io/api/badges/henry40408/turbo-spoon/status.svg)](https://ci.h08.io/henry40408/turbo-spoon)
+[![Build Status](https://ci.h08.io/api/badges/henry40408/cdu/status.svg)](https://ci.h08.io/henry40408/cdu) ![GitHub](https://img.shields.io/github/license/henry40408/cdu)
 
-Turbo Spoon is a daemon and CLI to update DNS records on Cloudflare.
+**C**loudflare **D**NS record **U**pdate
 
 ## Usage
 
@@ -14,8 +14,8 @@ $ docker run -it \
   -e CLOUDFLARE_TOKEN=[your Cloudflare token] \
   -e CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
   -e CLOUDFLARE_RECORDS=[name of DNS records on Cloudflare, separated by comma] \
-  henry40408/turbo-spoon \
-  /turbo-spoon
+  henry40408/cdu \
+  /cdu
 ```
 
 Run directly:

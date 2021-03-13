@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use log::{debug, info};
-use reqwest::{Client, header};
+use reqwest::{header, Client};
 use serde::Deserialize;
 use serde_json::json;
 use structopt::StructOpt;
@@ -15,27 +15,23 @@ use tokio::time;
 #[derive(StructOpt)]
 #[structopt(about, author)]
 struct Opts {
-    #[structopt(short, long, help = "Cloudflare token", env = "CLOUDFLARE_TOKEN")]
+    /// Cloudflare token
+    #[structopt(short, long, env = "CLOUDFLARE_TOKEN")]
     token: String,
-    #[structopt(short, long, help = "Cloudflare zone name", env = "CLOUDFLARE_ZONE")]
+    /// Cloudflare zone name
+    #[structopt(short, long, env = "CLOUDFLARE_ZONE")]
     zone: String,
-    #[structopt(
-        short,
-        long,
-        help = "Cloudflare records separated with comma e.g. a.x.com,b.x.com",
-        env = "CLOUDFLARE_RECORDS"
-    )]
+    /// Cloudflare records separated with comma e.g. a.x.com,b.x.com
+    #[structopt(short, long, env = "CLOUDFLARE_RECORDS")]
     records: String,
-    #[structopt(long, help = "Debug mode")]
+    /// Debug mode
+    #[structopt(long)]
     debug: bool,
-    #[structopt(short, long, help = "Daemon mode", env = "DAEMON")]
+    /// Daemon mode
+    #[structopt(short, long, env = "DAEMON")]
     daemon: bool,
-    #[structopt(
-        short,
-        long,
-        help = "Interval in seconds. Only in effect in daemon mode",
-        default_value = "60"
-    )]
+    /// Interval in seconds. Only in effect in daemon mode
+    #[structopt(short, long, default_value = "60", env = "INTERVAL")]
     interval: u64,
 }
 
@@ -45,9 +41,9 @@ async fn main() -> anyhow::Result<()> {
 
     if env::var_os("RUST_LOG").is_none() {
         if opts.debug {
-            env::set_var("RUST_LOG", "turbo_spoon=debug");
+            env::set_var("RUST_LOG", "cdu=debug");
         } else {
-            env::set_var("RUST_LOG", "turbo_spoon=info");
+            env::set_var("RUST_LOG", "cdu=info");
         }
     }
 
