@@ -54,11 +54,12 @@ async fn main() -> anyhow::Result<()> {
         token: opts.token,
         zone_name: opts.zone,
         record_names,
+        interval: opts.interval,
     };
     let cf_client = CFClient::new(params)?;
 
     if opts.daemon {
-        run_daemon(&cf_client, opts.interval).await?;
+        run_daemon(&cf_client).await?;
     } else {
         run_once(&cf_client).await?;
     }
@@ -66,15 +67,21 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_daemon(cf_client: &CFClient, seconds: u64) -> anyhow::Result<()> {
+async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
     info!("daemon starts, update for the first time");
 
+    let interval = cf_client.params.interval;
+    let duration = Duration::from_secs(interval);
+
+    let mut timer = time::interval(duration);
     loop {
-        info!("update DNS records");
-        run_once(cf_client).await?;
-        info!("done");
-        info!("wait for {0} seconds", seconds);
-        time::sleep(Duration::from_secs(seconds)).await;
+        info!("update DNS records and timeout is {0} seconds", interval);
+        match time::timeout(duration, run_once(cf_client)).await? {
+            Err(_) => bail!("operation timed out"),
+            _ => {}
+        }
+        info!("done. wait for next round");
+        timer.tick().await;
     }
 }
 
@@ -100,6 +107,7 @@ struct CFClientParams {
     token: String,
     zone_name: String,
     record_names: Vec<String>,
+    interval: u64,
 }
 
 struct CFClient {
