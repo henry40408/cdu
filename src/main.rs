@@ -74,6 +74,7 @@ async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
     let duration = Duration::from_secs(interval);
 
     let mut timer = time::interval(duration);
+    timer.tick().await; // tick for the first time
     loop {
         info!("update DNS records and timeout is {0} seconds", interval);
         match time::timeout(duration, run_once(cf_client)).await? {
@@ -81,7 +82,7 @@ async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
             _ => {}
         }
         info!("done. wait for next round");
-        timer.tick().await;
+        timer.tick().await; // wait for specific duration
     }
 }
 
