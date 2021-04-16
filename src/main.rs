@@ -77,10 +77,8 @@ async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
     timer.tick().await; // tick for the first time
     loop {
         info!("update DNS records and timeout is {0} seconds", interval);
-        match time::timeout(duration, run_once(cf_client)).await? {
-            Err(_) => bail!("operation timed out"),
-            _ => {}
-        }
+        let timeout_res = time::timeout(duration, run_once(cf_client)).await?;
+        let _run_once_res = timeout_res?;
         info!("done. wait for next round");
         timer.tick().await; // wait for specific duration
     }
@@ -164,7 +162,6 @@ impl CFClient {
     ) -> anyhow::Result<HashMap<String, String>> {
         let zone_id = zone_id.as_ref();
         let mut record_map: HashMap<String, String> = HashMap::new();
-
         for record_name in &self.params.record_names {
             let url = format!("{0}/zones/{1}/dns_records", CLOUDFLARE_API, zone_id);
             let res: DnsRecords = self
@@ -173,6 +170,7 @@ impl CFClient {
                 .query(&[("name", record_name)])
                 .send()
                 .await?
+                .error_for_status()?
                 .json()
                 .await?;
             let record_id = match res.result.first() {
@@ -216,6 +214,7 @@ impl CFClient {
                 .json(&json)
                 .send()
                 .await?
+                .error_for_status()?
                 .json()
                 .await?;
             results.push(res.result);
@@ -233,6 +232,7 @@ impl CFClient {
             .query(&[("name", zone_name)])
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         match res.result.first() {
