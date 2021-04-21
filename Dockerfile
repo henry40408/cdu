@@ -1,6 +1,5 @@
 FROM scratch
 
-ARG TARGETPLATFORM
-COPY target/${TARGETPLATFORM}/cdu /
+COPY target/x86_64-unknown-linux-musl/release/cdu /
 
 CMD ["/cdu"]
