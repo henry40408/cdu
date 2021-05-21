@@ -10,11 +10,11 @@ amd64: target/x86_64-unknown-linux-musl/release/cdu
 	docker push ${REGISTRY}/henry40408/cdu:${DIGEST}-amd64
 
 arm64: target/armv7-unknown-linux-musleabihf/release/cdu
-	docker build -t ${REGISTRY}/henry40408/cdu:${DIGEST}-arm64 .
+	docker build -t ${REGISTRY}/henry40408/cdu:${DIGEST}-arm64 -f Dockerfile.arm64 .
 	docker push ${REGISTRY}/henry40408/cdu:${DIGEST}-arm64
 
 manifest:
-	docker manifest create ${REGISTRY}/henry40408/cdu:${DIGEST} ${REGISTRY}/henry40408/cdu:${DIGEST}-amd64 ${REGISTRY}/henry40408/cdu:${DIGEST}-arm64
+	docker manifest create --amend ${REGISTRY}/henry40408/cdu:${DIGEST} ${REGISTRY}/henry40408/cdu:${DIGEST}-amd64 ${REGISTRY}/henry40408/cdu:${DIGEST}-arm64
 	docker manifest annotate ${REGISTRY}/henry40408/cdu:${DIGEST} ${REGISTRY}/henry40408/cdu:${DIGEST}-arm64 --os linux --arch arm64
 	docker manifest annotate ${REGISTRY}/henry40408/cdu:${DIGEST} ${REGISTRY}/henry40408/cdu:${DIGEST}-amd64 --os linux --arch amd64	
 	docker manifest push ${REGISTRY}/henry40408/cdu:${DIGEST}
