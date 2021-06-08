@@ -1,6 +1,6 @@
 # cdu
 
-[![Build Status](https://ci.h08.io/api/badges/henry40408/cdu/status.svg)](https://ci.h08.io/henry40408/cdu) ![GitHub](https://img.shields.io/github/license/henry40408/cdu)
+![GitHub Workflow](https://github.com/henry40408/cdu/actions/workflows/workflow.yml/badge.svg) ![GitHub](https://img.shields.io/github/license/henry40408/cdu)
 
 **C**loudflare **D**NS record **U**pdate
 
