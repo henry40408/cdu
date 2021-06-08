@@ -12,6 +12,9 @@ use serde_json::json;
 use structopt::StructOpt;
 use tokio::time;
 
+#[cfg(test)]
+use mockito;
+
 #[derive(StructOpt)]
 #[structopt(about, author)]
 struct Opts {
@@ -100,8 +103,7 @@ async fn run_once(cf_client: &CFClient) -> anyhow::Result<()> {
     Ok(())
 }
 
-const CLOUDFLARE_API: &'static str = "https://api.cloudflare.com/client/v4";
-
+#[derive(Default)]
 struct CFClientParams {
     token: String,
     zone_name: String,
@@ -142,6 +144,16 @@ struct Zones {
 }
 
 impl CFClient {
+    #[cfg(test)]
+    fn endpoint() -> String {
+        mockito::server_url()
+    }
+
+    #[cfg(not(test))]
+    fn endpoint() -> String {
+        "https://api.cloudflare.com/client/v4".to_string()
+    }
+
     fn new(params: CFClientParams) -> anyhow::Result<Self> {
         let mut headers = header::HeaderMap::new();
 
@@ -163,7 +175,7 @@ impl CFClient {
         let zone_id = zone_id.as_ref();
         let mut record_map: HashMap<String, String> = HashMap::new();
         for record_name in &self.params.record_names {
-            let url = format!("{0}/zones/{1}/dns_records", CLOUDFLARE_API, zone_id);
+            let url = format!("{0}/zones/{1}/dns_records", Self::endpoint(), zone_id);
             let res: DnsRecords = self
                 .client
                 .get(&url)
@@ -200,7 +212,9 @@ impl CFClient {
         for (ref record_name, ref record_id) in record_map {
             let url = format!(
                 "{0}/zones/{1}/dns_records/{2}",
-                CLOUDFLARE_API, zone_id, record_id
+                Self::endpoint(),
+                zone_id,
+                record_id
             );
             let json = json!({
                 "type": "A",
@@ -225,7 +239,7 @@ impl CFClient {
 
     async fn zone_name_to_id<S: AsRef<str>>(&self, zone_name: S) -> anyhow::Result<String> {
         let zone_name = zone_name.as_ref();
-        let url = format!("{0}/zones", CLOUDFLARE_API);
+        let url = format!("{0}/zones", Self::endpoint());
         let res: Zones = self
             .client
             .get(&url)
@@ -239,5 +253,57 @@ impl CFClient {
             Some(zone) => Ok(zone.id.clone()),
             None => bail!("zone {0} does not exist", zone_name),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{CFClient, CFClientParams};
+    use mockito::{mock, Matcher};
+    use serde_json::json;
+
+    #[test]
+    fn test_new() {
+        let _client = CFClient::new(CFClientParams::default());
+    }
+
+    #[tokio::test]
+    async fn test_zone_name_to_id() -> Result<(), anyhow::Error> {
+        let body = serde_json::to_string(&json!({
+            "result": [
+                {
+                    "id": "1a2b3c4d",
+                    "name": "zone",
+                }
+            ]
+        }))?;
+
+        let _m = mock("GET", "/zones")
+            .match_query(Matcher::UrlEncoded("name".into(), "zone".into()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+
+        let client = CFClient::new(CFClientParams::default())?;
+        let id = client.zone_name_to_id("zone").await?;
+        assert_eq!(id, "1a2b3c4d");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zone_name_to_id_failed() -> Result<(), anyhow::Error> {
+        let body = serde_json::to_string(&json!({
+            "result": []
+        }))?;
+
+        let _m = mock("GET", "/zones")
+            .match_query(Matcher::UrlEncoded("name".into(), "zone".into()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+
+        let client = CFClient::new(CFClientParams::default())?;
+        assert!(client.zone_name_to_id("zone").await.is_err());
+        Ok(())
     }
 }
