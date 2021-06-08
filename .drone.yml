@@ -2,6 +2,10 @@ kind: pipeline
 type: docker
 name: default
 
+platform:
+  os: linux
+  arch: arm64
+
 steps:
   - name: restore-cache
     image: appleboy/drone-sftp-cache
@@ -19,7 +23,7 @@ steps:
       mount:
         - target
   - name: check-test-build
-    image: rust:1.49.0-alpine
+    image: rust:1.52.1-alpine
     commands:
       - apk add --no-cache musl-dev
       - cargo check
