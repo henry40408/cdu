@@ -151,7 +151,7 @@ impl CFClient {
 
     #[cfg(not(test))]
     fn endpoint() -> String {
-        "https://api.cloudflare.com/client/v4".to_string()
+        "https://api.cloudflare.com/client/v4".into()
     }
 
     fn new(params: CFClientParams) -> anyhow::Result<Self> {
@@ -291,7 +291,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_zone_name_to_id_failed() -> Result<(), anyhow::Error> {
+    async fn test_zone_name_to_id_not_found() -> Result<(), anyhow::Error> {
         let body = serde_json::to_string(&json!({
             "result": []
         }))?;
@@ -304,6 +304,53 @@ mod test {
 
         let client = CFClient::new(CFClientParams::default())?;
         assert!(client.zone_name_to_id("zone").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_record_names_to_ids() -> Result<(), anyhow::Error> {
+        let body = serde_json::to_string(&json!({
+            "result": [
+                {
+                    "id": "2b3c4d5e",
+                    "name": "www.example.com",
+                    "content": "0.0.0.0"
+                }
+            ]
+        }))?;
+
+        let _m = mock("GET", "/zones/1a2b3c4d/dns_records")
+            .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+
+        let client = CFClient::new(CFClientParams {
+            record_names: vec!["www.example.com".into()],
+            ..Default::default()
+        })?;
+        let ids = client.record_names_to_ids("1a2b3c4d").await?;
+        assert_eq!(ids.get("www.example.com").unwrap(), "2b3c4d5e");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_record_names_to_ids_not_found() -> Result<(), anyhow::Error> {
+        let body = serde_json::to_string(&json!({
+            "result": []
+        }))?;
+
+        let _m = mock("GET", "/zones/1a2b3c4d/dns_records")
+            .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+
+        let client = CFClient::new(CFClientParams {
+            record_names: vec!["www.example.com".into()],
+            ..Default::default()
+        })?;
+        assert!(client.record_names_to_ids("1a2b3c4d").await.is_err());
         Ok(())
     }
 }
