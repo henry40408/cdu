@@ -8,9 +8,9 @@ platform:
 
 steps:
   - name: restore-cache
-    image: appleboy/drone-sftp-cache
+    image: meltwater/drone-cache
     settings:
-      server:
+      host:
         from_secret: sftp_server
       port:
         from_secret: sftp_port
@@ -34,9 +34,9 @@ steps:
     commands:
       - git rev-parse --short HEAD | tee .tags
   - name: rebuild-cache
-    image: appleboy/drone-sftp-cache
+    image: meltwater/drone-cache
     settings:
-      server:
+      host:
         from_secret: sftp_server
       port:
         from_secret: sftp_port
