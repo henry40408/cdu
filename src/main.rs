@@ -1,4 +1,4 @@
-#[forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 use std::collections::HashMap;
 use std::env;
 use std::net::Ipv4Addr;
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     pretty_env_logger::init();
 
-    let record_names: Vec<_> = opts.records.split(",").map(String::from).collect();
+    let record_names: Vec<_> = opts.records.split(',').map(String::from).collect();
     let params = CFClientParams {
         token: opts.token,
         zone_name: opts.zone,
@@ -261,6 +261,7 @@ mod test {
     use crate::{CFClient, CFClientParams};
     use mockito::{mock, Matcher};
     use serde_json::json;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_new() {
@@ -272,10 +273,10 @@ mod test {
         let body = serde_json::to_string(&json!({
             "result": [
                 {
-                    "id": "1a2b3c4d",
+                    "id": "1",
                     "name": "zone",
-                }
-            ]
+                },
+            ],
         }))?;
 
         let _m = mock("GET", "/zones")
@@ -286,14 +287,14 @@ mod test {
 
         let client = CFClient::new(CFClientParams::default())?;
         let id = client.zone_name_to_id("zone").await?;
-        assert_eq!(id, "1a2b3c4d");
+        assert_eq!(id, "1");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_zone_name_to_id_not_found() -> Result<(), anyhow::Error> {
         let body = serde_json::to_string(&json!({
-            "result": []
+            "result": [],
         }))?;
 
         let _m = mock("GET", "/zones")
@@ -312,14 +313,14 @@ mod test {
         let body = serde_json::to_string(&json!({
             "result": [
                 {
-                    "id": "2b3c4d5e",
+                    "id": "2",
                     "name": "www.example.com",
                     "content": "0.0.0.0"
-                }
-            ]
+                },
+            ],
         }))?;
 
-        let _m = mock("GET", "/zones/1a2b3c4d/dns_records")
+        let _m = mock("GET", "/zones/1/dns_records")
             .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
             .with_status(200)
             .with_body(body)
@@ -329,18 +330,18 @@ mod test {
             record_names: vec!["www.example.com".into()],
             ..Default::default()
         })?;
-        let ids = client.record_names_to_ids("1a2b3c4d").await?;
-        assert_eq!(ids.get("www.example.com").unwrap(), "2b3c4d5e");
+        let ids = client.record_names_to_ids("1").await?;
+        assert_eq!(ids.get("www.example.com").unwrap(), "2");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_record_names_to_ids_not_found() -> Result<(), anyhow::Error> {
         let body = serde_json::to_string(&json!({
-            "result": []
+            "result": [],
         }))?;
 
-        let _m = mock("GET", "/zones/1a2b3c4d/dns_records")
+        let _m = mock("GET", "/zones/1/dns_records")
             .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
             .with_status(200)
             .with_body(body)
@@ -350,7 +351,54 @@ mod test {
             record_names: vec!["www.example.com".into()],
             ..Default::default()
         })?;
-        assert!(client.record_names_to_ids("1a2b3c4d").await.is_err());
+        assert!(client.record_names_to_ids("1").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_update_dns_records() -> Result<(), anyhow::Error> {
+        let _m1 = mock("GET", "/zones")
+            .match_query(Matcher::UrlEncoded("name".into(), "zone".into()))
+            .with_status(200)
+            .with_body(serde_json::to_string(&json!({
+                "result": [
+                    {
+                        "id": "1",
+                        "name": "zone",
+                    },
+                ],
+            }))?)
+            .create();
+        let _m2 = mock("GET", "/zones/1/dns_records")
+            .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
+            .with_status(200)
+            .with_body(serde_json::to_string(&json!({
+                "result": [
+                    {
+                        "id": "2",
+                        "name": "www.example.com",
+                        "content": "0.0.0.0",
+                    },
+                ],
+            }))?)
+            .create();
+        let _m3 = mock("PUT", "/zones/1/dns_records/2")
+            .with_status(200)
+            .with_body(serde_json::to_string(&json!({
+                "result": {
+                    "id": "2",
+                    "name": "www.example.com",
+                    "content": "127.0.0.1",
+                },
+            }))?)
+            .create();
+        let client = CFClient::new(CFClientParams {
+            zone_name: "zone".into(),
+            record_names: vec!["www.example.com".into()],
+            ..Default::default()
+        })?;
+        let ip_address: Ipv4Addr = "127.0.0.1".parse()?;
+        client.update_dns_records(&ip_address).await?;
         Ok(())
     }
 }
