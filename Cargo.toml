@@ -9,6 +9,7 @@ description = "Cloudflare DNS record update"
 
 [dependencies]
 anyhow = "1.0.38"
+backoff = { version = "0.3.0", features = ["tokio"] }
 log = "0.4.14"
 pretty_env_logger = "0.4.0"
 public-ip = { version = "0.2.0", default-features = false, features = ["google", "opendns", "tokio-dns-resolver"] }

@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::bail;
+use backoff::ExponentialBackoff;
 use log::{debug, info};
 use reqwest::{header, Client};
 use serde::Deserialize;
@@ -80,8 +81,10 @@ async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
     timer.tick().await; // tick for the first time
     loop {
         info!("update DNS records and timeout is {0} seconds", interval);
-        let timeout_res = time::timeout(duration, run_once(cf_client)).await?;
-        let _run_once_res = timeout_res?;
+        backoff::future::retry(ExponentialBackoff::default(), || async {
+            Ok(run_once(cf_client).await?)
+        })
+        .await?;
         info!("done. wait for next round");
         timer.tick().await; // wait for specific duration
     }
