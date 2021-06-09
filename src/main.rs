@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 use std::env;
 use std::net::Ipv4Addr;
@@ -55,15 +56,15 @@ async fn main() -> anyhow::Result<()> {
 
     let record_names: Vec<_> = opts.records.split(',').map(String::from).collect();
     let params = CFClientParams {
-        token: opts.token,
-        zone_name: opts.zone,
+        token: opts.token.clone(),
+        zone_name: opts.zone.clone(),
         record_names,
         interval: opts.interval,
     };
     let cf_client = CFClient::new(params)?;
 
     if opts.daemon {
-        run_daemon(&cf_client).await?;
+        run_daemon(&opts, &cf_client).await?;
     } else {
         run_once(&cf_client).await?;
     }
@@ -71,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
+async fn run_daemon(opts: &Opts, cf_client: &CFClient) -> anyhow::Result<()> {
     info!("daemon starts, update for the first time");
 
     let interval = cf_client.params.interval;
@@ -81,9 +82,14 @@ async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
     timer.tick().await; // tick for the first time
     loop {
         info!("update DNS records and timeout is {0} seconds", interval);
-        backoff::future::retry(ExponentialBackoff::default(), || async {
-            Ok(run_once(cf_client).await?)
-        })
+        backoff::future::retry(
+            ExponentialBackoff {
+                // stop retrying before the next cycle starts
+                max_elapsed_time: Some(Duration::new(opts.interval, 0)),
+                ..Default::default()
+            },
+            || async { Ok(run_once(cf_client).await?) },
+        )
         .await?;
         info!("done. wait for next round");
         timer.tick().await; // wait for specific duration
