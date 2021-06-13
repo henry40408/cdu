@@ -90,6 +90,7 @@ async fn run_daemon(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
     timer.tick().await; // tick for the first time
     loop {
         info!("update DNS records and timeout is {0} seconds", interval);
+        // TODO introduce retry mechanism
         let timeout_res = time::timeout(duration, run_once(opts, client)).await?;
         let _run_once_res = timeout_res?;
         info!("done. wait for next round");
