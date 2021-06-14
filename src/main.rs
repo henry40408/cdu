@@ -62,11 +62,11 @@ async fn main() -> anyhow::Result<()> {
     let credentials = Credentials::UserAuthToken {
         token: opts.token.clone(),
     };
-    let client = match HttpApiClient::new(
-        credentials,
-        HttpApiClientConfig::default(),
-        Environment::Production,
-    ) {
+    let config = HttpApiClientConfig {
+        http_timeout: Duration::from_secs(opts.interval),
+        ..Default::default()
+    };
+    let client = match HttpApiClient::new(credentials, config, Environment::Production) {
         Ok(c) => c,
         Err(e) => bail!("failed to initialize Cloudflare client: {:?}", e),
     };
@@ -83,18 +83,17 @@ async fn main() -> anyhow::Result<()> {
 async fn run_daemon(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
     info!("daemon starts, update for the first time");
 
-    let interval = opts.interval;
-    let duration = Duration::from_secs(interval);
-
+    let duration = Duration::from_secs(opts.interval);
     let mut timer = time::interval(duration);
-    timer.tick().await; // tick for the first time
+    timer.tick().await; // first tick
     loop {
-        info!("update DNS records and timeout is {0} seconds", interval);
-        // TODO introduce retry mechanism
-        let timeout_res = time::timeout(duration, run_once(opts, client)).await?;
-        let _run_once_res = timeout_res?;
+        info!(
+            "update DNS records and timeout is {} seconds",
+            opts.interval
+        );
+        run_once(opts, client).await?;
         info!("done. wait for next round");
-        timer.tick().await; // wait for specific duration
+        timer.tick().await; // next tick
     }
 }
 
