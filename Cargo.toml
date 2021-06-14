@@ -9,10 +9,11 @@ description = "Cloudflare DNS record update"
 
 [dependencies]
 anyhow = "1.0.38"
+backoff = { version = "0.3.0", features = ["tokio"] }
+cloudflare-rs = "0.6.6"
 log = "0.4.14"
 pretty_env_logger = "0.4.0"
-public-ip = { version = "0.2.0", default-features = false, features = ["google", "opendns", "tokio-dns-resolver"] }
-reqwest = { version = "0.11.1", default-features = false, features = ["rustls-tls", "json"] }
+public-ip = { version = "0.2.0", default-features = false, features = ["google", "opendns", "tokio-http-resolver", "ipify-org"] }
 serde = { version = "1.0.124", features = ["derive"] }
 serde_json = "1.0.64"
 structopt = "0.3.21"

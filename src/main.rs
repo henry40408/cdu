@@ -1,19 +1,21 @@
 #[forbid(unsafe_code)]
-use std::collections::HashMap;
 use std::env;
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::bail;
+use backoff::ExponentialBackoff;
+use cloudflare::endpoints::dns::{
+    DnsContent, DnsRecord, ListDnsRecords, ListDnsRecordsParams, UpdateDnsRecord,
+    UpdateDnsRecordParams,
+};
+use cloudflare::endpoints::zone::{ListZones, ListZonesParams, Zone};
+use cloudflare::framework::apiclient::ApiClient;
+use cloudflare::framework::auth::Credentials;
+use cloudflare::framework::response::{ApiFailure, ApiSuccess};
+use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
 use log::{debug, info};
-use reqwest::{header, Client};
-use serde::Deserialize;
-use serde_json::json;
 use structopt::StructOpt;
 use tokio::time;
-
-#[cfg(test)]
-use mockito;
 
 #[derive(StructOpt)]
 #[structopt(about, author)]
@@ -38,6 +40,12 @@ struct Opts {
     interval: u64,
 }
 
+impl Opts {
+    fn record_name_list(&self) -> Vec<String> {
+        self.records.split(",").map(String::from).collect()
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::from_args();
@@ -52,305 +60,136 @@ async fn main() -> anyhow::Result<()> {
 
     pretty_env_logger::init();
 
-    let record_names: Vec<_> = opts.records.split(",").map(String::from).collect();
-    let params = CFClientParams {
-        token: opts.token,
-        zone_name: opts.zone,
-        record_names,
-        interval: opts.interval,
+    let credentials = Credentials::UserAuthToken {
+        token: opts.token.clone(),
     };
-    let cf_client = CFClient::new(params)?;
+    let config = HttpApiClientConfig {
+        http_timeout: Duration::from_secs(opts.interval),
+        ..Default::default()
+    };
+    let client = match HttpApiClient::new(credentials, config, Environment::Production) {
+        Ok(c) => c,
+        Err(e) => bail!("failed to initialize Cloudflare client: {:?}", e),
+    };
 
     if opts.daemon {
-        run_daemon(&cf_client).await?;
+        run_daemon(&opts, &client).await?;
     } else {
-        run_once(&cf_client).await?;
+        run_once(&opts, &client).await?;
     }
 
     Ok(())
 }
 
-async fn run_daemon(cf_client: &CFClient) -> anyhow::Result<()> {
+async fn run_daemon(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
     info!("daemon starts, update for the first time");
 
-    let interval = cf_client.params.interval;
+    let interval = opts.interval;
     let duration = Duration::from_secs(interval);
 
     let mut timer = time::interval(duration);
-    timer.tick().await; // tick for the first time
+    timer.tick().await; // first tick
     loop {
-        info!("update DNS records and timeout is {0} seconds", interval);
-        let timeout_res = time::timeout(duration, run_once(cf_client)).await?;
-        let _run_once_res = timeout_res?;
+        info!("update DNS records and timeout is {} seconds", interval);
+
+        let task = || async {
+            match run_once(opts, client).await {
+                Ok(a) => Ok(a),
+                Err(e) => {
+                    if let Some(_e) = e.downcast_ref::<ApiFailure>() {
+                        Err(backoff::Error::Transient(e))
+                    } else if let Some(_e) = e.downcast_ref::<PublicIPError>() {
+                        Err(backoff::Error::Transient(e))
+                    } else {
+                        Err(backoff::Error::Permanent(e))
+                    }
+                }
+            }
+        };
+        let backoff_opts = ExponentialBackoff {
+            max_interval: duration,
+            ..Default::default()
+        };
+        backoff::future::retry(backoff_opts, task).await?;
+
         info!("done. wait for next round");
-        timer.tick().await; // wait for specific duration
+
+        timer.tick().await; // next tick
     }
 }
 
-async fn run_once(cf_client: &CFClient) -> anyhow::Result<()> {
-    let ip_address = match public_ip::addr_v4().await {
-        Some(ip_address) => ip_address,
-        None => bail!("failed to determine public IPv4 address"),
+#[derive(Debug, Clone)]
+struct PublicIPError;
+
+impl std::fmt::Display for PublicIPError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to determine public IPv4 address")
+    }
+}
+
+impl std::error::Error for PublicIPError {}
+
+async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
+    let ip_address = public_ip::addr_v4().await.ok_or(PublicIPError)?;
+
+    debug!("public IPv4 address: {}", &ip_address);
+
+    let params = ListZones {
+        params: ListZonesParams {
+            name: Some(opts.zone.clone()),
+            ..Default::default()
+        },
+    };
+    let res: ApiSuccess<Vec<Zone>> = client.request(&params)?;
+    let zone = match res.result.first() {
+        Some(zone) => zone,
+        None => bail!("zone not found: {}", opts.zone),
     };
 
-    debug!("public IPv4 address: {0}", &ip_address);
+    debug!("zone found: {} ({})", &opts.zone, &zone.id);
 
-    let results = cf_client.update_dns_records(&ip_address).await?;
-    for result in results {
-        debug!("DNS record {0} refers to {1}", result.name, result.content);
+    let mut dns_record_ids = vec![];
+    for record_name in opts.record_name_list() {
+        let params = ListDnsRecords {
+            zone_identifier: &zone.id,
+            params: ListDnsRecordsParams {
+                name: Some(record_name.clone()),
+                ..Default::default()
+            },
+        };
+        let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params)?;
+        let dns_record = match res.result.first() {
+            Some(dns_record) => dns_record,
+            None => bail!("DNS record not found: {}", record_name),
+        };
+        debug!("DNS record found: {} ({})", &record_name, &dns_record.id);
+        dns_record_ids.push((dns_record.id.clone(), record_name));
+    }
+
+    for (dns_record_id, record_name) in dns_record_ids {
+        let params = UpdateDnsRecord {
+            zone_identifier: &zone.id,
+            identifier: &dns_record_id,
+            params: UpdateDnsRecordParams {
+                name: &record_name,
+                content: DnsContent::A {
+                    content: ip_address,
+                },
+                proxied: None,
+                ttl: None,
+            },
+        };
+        let res: ApiSuccess<DnsRecord> = client.request(&params)?;
+        let dns_record = res.result;
+        let content = match dns_record.content {
+            DnsContent::A { content } => content.to_string(),
+            _ => "(not an A record)".into(),
+        };
+        debug!(
+            "DNS record updated: {} ({}) -> {}",
+            &record_name, &dns_record_id, content
+        );
     }
 
     Ok(())
-}
-
-#[derive(Default)]
-struct CFClientParams {
-    token: String,
-    zone_name: String,
-    record_names: Vec<String>,
-    interval: u64,
-}
-
-struct CFClient {
-    params: CFClientParams,
-    client: Client,
-}
-
-#[derive(Deserialize)]
-struct DnsRecord {
-    id: String,
-    name: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct DnsRecords {
-    result: Vec<DnsRecord>,
-}
-
-#[derive(Deserialize)]
-struct UpdateDnsRecord {
-    result: DnsRecord,
-}
-
-#[derive(Deserialize)]
-struct Zone {
-    id: String,
-}
-
-#[derive(Deserialize)]
-struct Zones {
-    result: Vec<Zone>,
-}
-
-impl CFClient {
-    #[cfg(test)]
-    fn endpoint() -> String {
-        mockito::server_url()
-    }
-
-    #[cfg(not(test))]
-    fn endpoint() -> String {
-        "https://api.cloudflare.com/client/v4".into()
-    }
-
-    fn new(params: CFClientParams) -> anyhow::Result<Self> {
-        let mut headers = header::HeaderMap::new();
-
-        let authorization = format!("Bearer {0}", &params.token);
-        let mut authorization = header::HeaderValue::from_str(&authorization)?;
-        authorization.set_sensitive(true);
-        headers.insert(header::AUTHORIZATION, authorization);
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()?;
-        Ok(Self { params, client })
-    }
-
-    async fn record_names_to_ids<S: AsRef<str>>(
-        &self,
-        zone_id: S,
-    ) -> anyhow::Result<HashMap<String, String>> {
-        let zone_id = zone_id.as_ref();
-        let mut record_map: HashMap<String, String> = HashMap::new();
-        for record_name in &self.params.record_names {
-            let url = format!("{0}/zones/{1}/dns_records", Self::endpoint(), zone_id);
-            let res: DnsRecords = self
-                .client
-                .get(&url)
-                .query(&[("name", record_name)])
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            let record_id = match res.result.first() {
-                Some(dns_record) => dns_record.id.clone(),
-                None => bail!("DNS record {0} does not exist", record_name),
-            };
-            record_map.insert(record_name.clone(), record_id);
-        }
-
-        Ok(record_map)
-    }
-
-    async fn update_dns_records(&self, ip_address: &Ipv4Addr) -> anyhow::Result<Vec<DnsRecord>> {
-        let zone_id = self.zone_name_to_id(&self.params.zone_name).await?;
-        debug!("zone {0} (id: {1}) found", &self.params.zone_name, &zone_id);
-
-        let record_map = self.record_names_to_ids(&zone_id).await?;
-        for (ref record_name, ref record_id) in &record_map {
-            debug!(
-                "DNS record {2} (id: {3}) found in {0} (id: {1})",
-                self.params.zone_name, zone_id, record_name, record_id
-            )
-        }
-
-        let mut results = vec![];
-
-        for (ref record_name, ref record_id) in record_map {
-            let url = format!(
-                "{0}/zones/{1}/dns_records/{2}",
-                Self::endpoint(),
-                zone_id,
-                record_id
-            );
-            let json = json!({
-                "type": "A",
-                "name": record_name,
-                "content": ip_address,
-                "ttl": 1, // = automatic
-            });
-            let res: UpdateDnsRecord = self
-                .client
-                .put(&url)
-                .json(&json)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            results.push(res.result);
-        }
-
-        Ok(results)
-    }
-
-    async fn zone_name_to_id<S: AsRef<str>>(&self, zone_name: S) -> anyhow::Result<String> {
-        let zone_name = zone_name.as_ref();
-        let url = format!("{0}/zones", Self::endpoint());
-        let res: Zones = self
-            .client
-            .get(&url)
-            .query(&[("name", zone_name)])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        match res.result.first() {
-            Some(zone) => Ok(zone.id.clone()),
-            None => bail!("zone {0} does not exist", zone_name),
-        }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{CFClient, CFClientParams};
-    use mockito::{mock, Matcher};
-    use serde_json::json;
-
-    #[test]
-    fn test_new() {
-        let _client = CFClient::new(CFClientParams::default());
-    }
-
-    #[tokio::test]
-    async fn test_zone_name_to_id() -> Result<(), anyhow::Error> {
-        let body = serde_json::to_string(&json!({
-            "result": [
-                {
-                    "id": "1a2b3c4d",
-                    "name": "zone",
-                }
-            ]
-        }))?;
-
-        let _m = mock("GET", "/zones")
-            .match_query(Matcher::UrlEncoded("name".into(), "zone".into()))
-            .with_status(200)
-            .with_body(body)
-            .create();
-
-        let client = CFClient::new(CFClientParams::default())?;
-        let id = client.zone_name_to_id("zone").await?;
-        assert_eq!(id, "1a2b3c4d");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_zone_name_to_id_not_found() -> Result<(), anyhow::Error> {
-        let body = serde_json::to_string(&json!({
-            "result": []
-        }))?;
-
-        let _m = mock("GET", "/zones")
-            .match_query(Matcher::UrlEncoded("name".into(), "zone".into()))
-            .with_status(200)
-            .with_body(body)
-            .create();
-
-        let client = CFClient::new(CFClientParams::default())?;
-        assert!(client.zone_name_to_id("zone").await.is_err());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_record_names_to_ids() -> Result<(), anyhow::Error> {
-        let body = serde_json::to_string(&json!({
-            "result": [
-                {
-                    "id": "2b3c4d5e",
-                    "name": "www.example.com",
-                    "content": "0.0.0.0"
-                }
-            ]
-        }))?;
-
-        let _m = mock("GET", "/zones/1a2b3c4d/dns_records")
-            .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
-            .with_status(200)
-            .with_body(body)
-            .create();
-
-        let client = CFClient::new(CFClientParams {
-            record_names: vec!["www.example.com".into()],
-            ..Default::default()
-        })?;
-        let ids = client.record_names_to_ids("1a2b3c4d").await?;
-        assert_eq!(ids.get("www.example.com").unwrap(), "2b3c4d5e");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_record_names_to_ids_not_found() -> Result<(), anyhow::Error> {
-        let body = serde_json::to_string(&json!({
-            "result": []
-        }))?;
-
-        let _m = mock("GET", "/zones/1a2b3c4d/dns_records")
-            .match_query(Matcher::UrlEncoded("name".into(), "www.example.com".into()))
-            .with_status(200)
-            .with_body(body)
-            .create();
-
-        let client = CFClient::new(CFClientParams {
-            record_names: vec!["www.example.com".into()],
-            ..Default::default()
-        })?;
-        assert!(client.record_names_to_ids("1a2b3c4d").await.is_err());
-        Ok(())
-    }
 }
