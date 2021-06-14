@@ -3,6 +3,7 @@ use std::env;
 use std::time::Duration;
 
 use anyhow::bail;
+use backoff::ExponentialBackoff;
 use cloudflare::endpoints::dns::{
     DnsContent, DnsRecord, ListDnsRecords, ListDnsRecordsParams, UpdateDnsRecord,
     UpdateDnsRecordParams,
@@ -10,7 +11,7 @@ use cloudflare::endpoints::dns::{
 use cloudflare::endpoints::zone::{ListZones, ListZonesParams, Zone};
 use cloudflare::framework::apiclient::ApiClient;
 use cloudflare::framework::auth::Credentials;
-use cloudflare::framework::response::ApiSuccess;
+use cloudflare::framework::response::{ApiFailure, ApiSuccess};
 use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
 use log::{debug, info};
 use structopt::StructOpt;
@@ -83,27 +84,55 @@ async fn main() -> anyhow::Result<()> {
 async fn run_daemon(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
     info!("daemon starts, update for the first time");
 
-    let duration = Duration::from_secs(opts.interval);
+    let interval = opts.interval;
+    let duration = Duration::from_secs(interval);
+
     let mut timer = time::interval(duration);
     timer.tick().await; // first tick
     loop {
-        info!(
-            "update DNS records and timeout is {} seconds",
-            opts.interval
-        );
-        run_once(opts, client).await?;
+        info!("update DNS records and timeout is {} seconds", interval);
+
+        let task = || async {
+            match run_once(opts, client).await {
+                Ok(a) => Ok(a),
+                Err(e) => {
+                    if let Some(_e) = e.downcast_ref::<ApiFailure>() {
+                        Err(backoff::Error::Transient(e))
+                    } else if let Some(_e) = e.downcast_ref::<PublicIPError>() {
+                        Err(backoff::Error::Transient(e))
+                    } else {
+                        Err(backoff::Error::Permanent(e))
+                    }
+                }
+            }
+        };
+        let backoff_opts = ExponentialBackoff {
+            max_interval: duration,
+            ..Default::default()
+        };
+        backoff::future::retry(backoff_opts, task).await?;
+
         info!("done. wait for next round");
+
         timer.tick().await; // next tick
     }
 }
 
-async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
-    let ip_address = match public_ip::addr_v4().await {
-        Some(ip_address) => ip_address,
-        None => bail!("failed to determine public IPv4 address"),
-    };
+#[derive(Debug, Clone)]
+struct PublicIPError;
 
-    debug!("public IPv4 address: {0}", &ip_address);
+impl std::fmt::Display for PublicIPError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to determine public IPv4 address")
+    }
+}
+
+impl std::error::Error for PublicIPError {}
+
+async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
+    let ip_address = public_ip::addr_v4().await.ok_or(PublicIPError)?;
+
+    debug!("public IPv4 address: {}", &ip_address);
 
     let params = ListZones {
         params: ListZonesParams {
@@ -114,7 +143,7 @@ async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
     let res: ApiSuccess<Vec<Zone>> = client.request(&params)?;
     let zone = match res.result.first() {
         Some(zone) => zone,
-        None => bail!("zone not found: {:?}", opts.zone),
+        None => bail!("zone not found: {}", opts.zone),
     };
 
     debug!("zone found: {} ({})", &opts.zone, &zone.id);
@@ -131,7 +160,7 @@ async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
         let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params)?;
         let dns_record = match res.result.first() {
             Some(dns_record) => dns_record,
-            None => bail!("DNS record not found: {:?}", record_name),
+            None => bail!("DNS record not found: {}", record_name),
         };
         debug!("DNS record found: {} ({})", &record_name, &dns_record.id);
         dns_record_ids.push((dns_record.id.clone(), record_name));
