@@ -24,7 +24,7 @@ Run directly:
 CLOUDFLARE_TOKEN=[your Cloudflare token] \
 CLOUDFLARE_ZONE=[name of your zone on Cloudflare] \
 CLOUDFLARE_RECORDS=[name of DNS records on Cloudflare, separated by comma] \
-cargo run -d
+cargo run -- --daemon true
 ```
 
 Run once:
