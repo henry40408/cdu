@@ -9,10 +9,10 @@ use cloudflare::endpoints::dns::{
     UpdateDnsRecordParams,
 };
 use cloudflare::endpoints::zone::{ListZones, ListZonesParams, Zone};
-use cloudflare::framework::apiclient::ApiClient;
+use cloudflare::framework::async_api::{ApiClient, Client};
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::response::{ApiFailure, ApiSuccess};
-use cloudflare::framework::{Environment, HttpApiClient, HttpApiClientConfig};
+use cloudflare::framework::{Environment, HttpApiClientConfig};
 use log::{debug, info};
 use structopt::StructOpt;
 use tokio::time;
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         http_timeout: Duration::from_secs(opts.interval),
         ..Default::default()
     };
-    let client = match HttpApiClient::new(credentials, config, Environment::Production) {
+    let client = match Client::new(credentials, config, Environment::Production) {
         Ok(c) => c,
         Err(e) => bail!("failed to initialize Cloudflare client: {:?}", e),
     };
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_daemon(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
+async fn run_daemon(opts: &Opts, client: &Client) -> anyhow::Result<()> {
     info!("daemon starts, update for the first time");
 
     let interval = opts.interval;
@@ -129,7 +129,7 @@ impl std::fmt::Display for PublicIPError {
 
 impl std::error::Error for PublicIPError {}
 
-async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
+async fn run_once(opts: &Opts, client: &Client) -> anyhow::Result<()> {
     let ip_address = public_ip::addr_v4().await.ok_or(PublicIPError)?;
 
     debug!("public IPv4 address: {}", &ip_address);
@@ -140,7 +140,7 @@ async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
             ..Default::default()
         },
     };
-    let res: ApiSuccess<Vec<Zone>> = client.request(&params)?;
+    let res: ApiSuccess<Vec<Zone>> = client.request(&params).await?;
     let zone = match res.result.first() {
         Some(zone) => zone,
         None => bail!("zone not found: {}", opts.zone),
@@ -157,7 +157,7 @@ async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
                 ..Default::default()
             },
         };
-        let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params)?;
+        let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params).await?;
         let dns_record = match res.result.first() {
             Some(dns_record) => dns_record,
             None => bail!("DNS record not found: {}", record_name),
@@ -179,7 +179,7 @@ async fn run_once(opts: &Opts, client: &HttpApiClient) -> anyhow::Result<()> {
                 ttl: None,
             },
         };
-        let res: ApiSuccess<DnsRecord> = client.request(&params)?;
+        let res: ApiSuccess<DnsRecord> = client.request(&params).await?;
         let dns_record = res.result;
         let content = match dns_record.content {
             DnsContent::A { content } => content.to_string(),
