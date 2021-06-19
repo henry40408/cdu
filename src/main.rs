@@ -1,9 +1,10 @@
-#[forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 use std::env;
-use std::time::Duration;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::bail;
-use backoff::ExponentialBackoff;
 use cloudflare::endpoints::dns::{
     DnsContent, DnsRecord, ListDnsRecords, ListDnsRecordsParams, UpdateDnsRecord,
     UpdateDnsRecordParams,
@@ -13,9 +14,13 @@ use cloudflare::framework::async_api::{ApiClient, Client};
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::response::{ApiFailure, ApiSuccess};
 use cloudflare::framework::{Environment, HttpApiClientConfig};
+use cron::Schedule;
 use log::{debug, info};
 use structopt::StructOpt;
-use tokio::time;
+use tokio::task::JoinHandle;
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
+
+const HTTP_TIMEOUT: u64 = 30;
 
 #[derive(StructOpt)]
 #[structopt(about, author)]
@@ -35,14 +40,14 @@ struct Opts {
     /// Daemon mode
     #[structopt(short, long, env = "DAEMON")]
     daemon: bool,
-    /// Interval in seconds. Only in effect in daemon mode
-    #[structopt(short, long, default_value = "60", env = "INTERVAL")]
-    interval: u64,
+    /// Cron. Only in effect in daemon mode
+    #[structopt(short, long, default_value = "0 */5 * * * * *", env = "CRON")]
+    cron: String,
 }
 
 impl Opts {
     fn record_name_list(&self) -> Vec<String> {
-        self.records.split(",").map(String::from).collect()
+        self.records.split(',').map(String::from).collect()
     }
 }
 
@@ -60,62 +65,43 @@ async fn main() -> anyhow::Result<()> {
 
     pretty_env_logger::init();
 
-    let credentials = Credentials::UserAuthToken {
-        token: opts.token.clone(),
-    };
-    let config = HttpApiClientConfig {
-        http_timeout: Duration::from_secs(opts.interval),
-        ..Default::default()
-    };
-    let client = match Client::new(credentials, config, Environment::Production) {
-        Ok(c) => c,
-        Err(e) => bail!("failed to initialize Cloudflare client: {:?}", e),
-    };
-
     if opts.daemon {
-        run_daemon(&opts, &client).await?;
+        run_daemon(&opts).await?;
     } else {
-        run_once(&opts, &client).await?;
+        run_once(&opts).await?;
     }
 
     Ok(())
 }
 
-async fn run_daemon(opts: &Opts, client: &Client) -> anyhow::Result<()> {
-    info!("daemon starts, update for the first time");
+async fn run_daemon(opts: &Opts) -> anyhow::Result<()> {
+    let schedule = Schedule::from_str(&opts.cron)?;
 
-    let interval = opts.interval;
-    let duration = Duration::from_secs(interval);
+    for datetime in schedule.upcoming(chrono::Utc) {
+        info!("update DNS records at {}", datetime);
 
-    let mut timer = time::interval(duration);
-    timer.tick().await; // first tick
-    loop {
-        info!("update DNS records and timeout is {} seconds", interval);
-
-        let task = || async {
-            match run_once(opts, client).await {
-                Ok(a) => Ok(a),
-                Err(e) => {
-                    if let Some(_e) = e.downcast_ref::<ApiFailure>() {
-                        Err(backoff::Error::Transient(e))
-                    } else if let Some(_e) = e.downcast_ref::<PublicIPError>() {
-                        Err(backoff::Error::Transient(e))
-                    } else {
-                        Err(backoff::Error::Permanent(e))
-                    }
-                }
+        loop {
+            if chrono::Utc::now() > datetime {
+                break;
+            } else {
+                tokio::time::sleep(Duration::from_millis(999)).await;
             }
-        };
-        let backoff_opts = ExponentialBackoff {
-            max_interval: duration,
-            ..Default::default()
-        };
-        backoff::future::retry(backoff_opts, task).await?;
+        }
 
-        info!("done. wait for next round");
+        let strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
+        let instant = Instant::now();
+        tokio_retry::RetryIf::spawn(
+            strategy,
+            || run_once(opts),
+            |e: &anyhow::Error| e.is::<ApiFailure>() || e.is::<PublicIPError>(),
+        )
+        .await?;
 
-        timer.tick().await; // next tick
+        let duration = Instant::now() - instant;
+        info!("done in {}ms", duration.as_millis());
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -129,8 +115,17 @@ impl std::fmt::Display for PublicIPError {
 
 impl std::error::Error for PublicIPError {}
 
-async fn run_once(opts: &Opts, client: &Client) -> anyhow::Result<()> {
+async fn run_once(opts: &Opts) -> anyhow::Result<()> {
     let ip_address = public_ip::addr_v4().await.ok_or(PublicIPError)?;
+
+    let credentials = Credentials::UserAuthToken {
+        token: opts.token.clone(),
+    };
+    let config = HttpApiClientConfig {
+        http_timeout: Duration::from_secs(HTTP_TIMEOUT),
+        ..Default::default()
+    };
+    let client = Arc::new(Client::new(credentials, config, Environment::Production)?);
 
     debug!("public IPv4 address: {}", &ip_address);
 
@@ -141,54 +136,75 @@ async fn run_once(opts: &Opts, client: &Client) -> anyhow::Result<()> {
         },
     };
     let res: ApiSuccess<Vec<Zone>> = client.request(&params).await?;
-    let zone = match res.result.first() {
-        Some(zone) => zone,
+    let zone_id = match res.result.first() {
+        Some(zone) => zone.id.to_string(),
         None => bail!("zone not found: {}", opts.zone),
     };
 
-    debug!("zone found: {} ({})", &opts.zone, &zone.id);
+    debug!("zone found: {} ({})", &opts.zone, &zone_id);
 
-    let mut dns_record_ids = vec![];
+    let mut futs = vec![];
     for record_name in opts.record_name_list() {
-        let params = ListDnsRecords {
-            zone_identifier: &zone.id,
-            params: ListDnsRecordsParams {
-                name: Some(record_name.clone()),
-                ..Default::default()
-            },
-        };
-        let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params).await?;
-        let dns_record = match res.result.first() {
-            Some(dns_record) => dns_record,
-            None => bail!("DNS record not found: {}", record_name),
-        };
-        debug!("DNS record found: {} ({})", &record_name, &dns_record.id);
-        dns_record_ids.push((dns_record.id.clone(), record_name));
+        let client = client.clone();
+        let zone_id = zone_id.clone();
+        futs.push(tokio::spawn(async move {
+            let params = ListDnsRecords {
+                zone_identifier: &zone_id,
+                params: ListDnsRecordsParams {
+                    name: Some(record_name.clone()),
+                    ..Default::default()
+                },
+            };
+            let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params).await?;
+            let dns_record = match res.result.first() {
+                Some(dns_record) => dns_record,
+                None => bail!("DNS record not found: {}", record_name),
+            };
+            debug!("DNS record found: {} ({})", &record_name, &dns_record.id);
+            Ok((dns_record.id.clone(), record_name))
+        }));
     }
 
+    let mut dns_record_ids = vec![];
+    for fut in futs {
+        let (dns_record_id, record_name) = fut.await??;
+        dns_record_ids.push((dns_record_id, record_name));
+    }
+
+    let mut futs: Vec<JoinHandle<anyhow::Result<()>>> = vec![];
     for (dns_record_id, record_name) in dns_record_ids {
-        let params = UpdateDnsRecord {
-            zone_identifier: &zone.id,
-            identifier: &dns_record_id,
-            params: UpdateDnsRecordParams {
-                name: &record_name,
-                content: DnsContent::A {
-                    content: ip_address,
+        let client = client.clone();
+        let zone_id = zone_id.clone();
+        futs.push(tokio::spawn(async move {
+            let params = UpdateDnsRecord {
+                zone_identifier: &zone_id,
+                identifier: &dns_record_id,
+                params: UpdateDnsRecordParams {
+                    name: &record_name,
+                    content: DnsContent::A {
+                        content: ip_address,
+                    },
+                    proxied: None,
+                    ttl: None,
                 },
-                proxied: None,
-                ttl: None,
-            },
-        };
-        let res: ApiSuccess<DnsRecord> = client.request(&params).await?;
-        let dns_record = res.result;
-        let content = match dns_record.content {
-            DnsContent::A { content } => content.to_string(),
-            _ => "(not an A record)".into(),
-        };
-        debug!(
-            "DNS record updated: {} ({}) -> {}",
-            &record_name, &dns_record_id, content
-        );
+            };
+            let res: ApiSuccess<DnsRecord> = client.request(&params).await?;
+            let dns_record = res.result;
+            let content = match dns_record.content {
+                DnsContent::A { content } => content.to_string(),
+                _ => "(not an A record)".into(),
+            };
+            debug!(
+                "DNS record updated: {} ({}) -> {}",
+                &record_name, &dns_record_id, content
+            );
+
+            Ok(())
+        }));
+    }
+
+    for fut in futs {
+        fut.await??;
     }
 
     Ok(())
