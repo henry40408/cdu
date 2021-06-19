@@ -93,15 +93,7 @@ async fn run_daemon(opts: &Opts) -> anyhow::Result<()> {
         tokio_retry::RetryIf::spawn(
             strategy,
             || run_once(opts),
-            |e: &anyhow::Error| {
-                if let Some(_e) = e.downcast_ref::<ApiFailure>() {
-                    true
-                } else if let Some(_e) = e.downcast_ref::<PublicIPError>() {
-                    true
-                } else {
-                    false
-                }
-            },
+            |e: &anyhow::Error| e.is::<ApiFailure>() || e.is::<PublicIPError>(),
         )
         .await?;
 
