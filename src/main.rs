@@ -1,6 +1,7 @@
-#[forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 use std::env;
-use std::time::Duration;
+use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use backoff::ExponentialBackoff;
@@ -13,9 +14,11 @@ use cloudflare::framework::async_api::{ApiClient, Client};
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::response::{ApiFailure, ApiSuccess};
 use cloudflare::framework::{Environment, HttpApiClientConfig};
+use cron::Schedule;
 use log::{debug, info};
 use structopt::StructOpt;
-use tokio::time;
+
+const HTTP_TIMEOUT: u64 = 30;
 
 #[derive(StructOpt)]
 #[structopt(about, author)]
@@ -35,14 +38,14 @@ struct Opts {
     /// Daemon mode
     #[structopt(short, long, env = "DAEMON")]
     daemon: bool,
-    /// Interval in seconds. Only in effect in daemon mode
-    #[structopt(short, long, default_value = "60", env = "INTERVAL")]
-    interval: u64,
+    /// Cron. Only in effect in daemon mode
+    #[structopt(short, long, default_value = "0 */5 * * * * *", env = "INTERVAL")]
+    cron: String,
 }
 
 impl Opts {
     fn record_name_list(&self) -> Vec<String> {
-        self.records.split(",").map(String::from).collect()
+        self.records.split(',').map(String::from).collect()
     }
 }
 
@@ -64,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         token: opts.token.clone(),
     };
     let config = HttpApiClientConfig {
-        http_timeout: Duration::from_secs(opts.interval),
+        http_timeout: Duration::from_secs(HTTP_TIMEOUT),
         ..Default::default()
     };
     let client = match Client::new(credentials, config, Environment::Production) {
@@ -82,15 +85,18 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_daemon(opts: &Opts, client: &Client) -> anyhow::Result<()> {
-    info!("daemon starts, update for the first time");
+    let max_interval = Duration::from_secs(HTTP_TIMEOUT);
+    let schedule = Schedule::from_str(&opts.cron)?;
+    for datetime in schedule.upcoming(chrono::Utc) {
+        info!("update DNS records at {}", datetime);
 
-    let interval = opts.interval;
-    let duration = Duration::from_secs(interval);
-
-    let mut timer = time::interval(duration);
-    timer.tick().await; // first tick
-    loop {
-        info!("update DNS records and timeout is {} seconds", interval);
+        loop {
+            if chrono::Utc::now() > datetime {
+                break;
+            } else {
+                tokio::time::sleep(Duration::from_millis(999)).await;
+            }
+        }
 
         let task = || async {
             match run_once(opts, client).await {
@@ -107,15 +113,17 @@ async fn run_daemon(opts: &Opts, client: &Client) -> anyhow::Result<()> {
             }
         };
         let backoff_opts = ExponentialBackoff {
-            max_interval: duration,
+            max_interval,
             ..Default::default()
         };
+
+        let instant = Instant::now();
         backoff::future::retry(backoff_opts, task).await?;
-
-        info!("done. wait for next round");
-
-        timer.tick().await; // next tick
+        let duration = Instant::now() - instant;
+        info!("done in {}ms", duration.as_millis());
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
