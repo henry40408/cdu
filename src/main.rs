@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+
 use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -166,12 +167,12 @@ async fn run_once(opts: &Opts) -> anyhow::Result<()> {
     }
 
     let mut dns_record_ids = vec![];
-    for fut in futs {
-        let (dns_record_id, record_name) = fut.await??;
+    for fut in futures::future::join_all(futs).await {
+        let (dns_record_id, record_name) = fut??;
         dns_record_ids.push((dns_record_id, record_name));
     }
 
-    let mut futs: Vec<JoinHandle<anyhow::Result<()>>> = vec![];
+    let mut futs: Vec<JoinHandle<anyhow::Result<(String, String, String)>>> = vec![];
     for (dns_record_id, record_name) in dns_record_ids {
         let client = client.clone();
         let zone_id = zone_id.clone();
@@ -194,17 +195,14 @@ async fn run_once(opts: &Opts) -> anyhow::Result<()> {
                 DnsContent::A { content } => content.to_string(),
                 _ => "(not an A record)".into(),
             };
-            debug!(
-                "DNS record updated: {} ({}) -> {}",
-                &record_name, &dns_record_id, content
-            );
 
-            Ok(())
+            Ok((record_name, dns_record_id, content))
         }));
     }
 
-    for fut in futs {
-        fut.await??;
+    for fut in futures::future::join_all(futs).await {
+        let (r, d, c) = fut??;
+        debug!("DNS record updated: {} ({}) -> {}", &r, &d, &c);
     }
 
     Ok(())
