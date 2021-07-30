@@ -19,6 +19,7 @@ public-ip = { version = "0.2.0", default-features = false, features = ["google",
 structopt = "0.3.21"
 tokio = { version = "1.2.0", features = ["macros", "rt-multi-thread", "time"] }
 tokio-retry = "0.3.0"
+ttl_cache = "0.5.1"
 
 [dev-dependencies]
 
