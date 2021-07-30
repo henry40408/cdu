@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::bail;
@@ -13,6 +13,7 @@ use cloudflare::framework::response::ApiSuccess;
 use cloudflare::framework::{Environment, HttpApiClientConfig};
 use log::debug;
 use tokio::task::JoinHandle;
+use ttl_cache::TtlCache;
 
 use crate::{Opts, PublicIPError};
 
@@ -20,11 +21,25 @@ const HTTP_TIMEOUT: u64 = 30;
 
 pub struct Cdu {
     opts: Opts,
+    cache: Arc<Mutex<TtlCache<String, String>>>,
 }
 
 impl Cdu {
     pub fn new(opts: Opts) -> Self {
-        Self { opts }
+        let capacity = opts.record_name_list().len();
+        Self {
+            opts,
+            // zone identifier and record identifiers
+            cache: Arc::new(Mutex::new(TtlCache::new(capacity + 1))),
+        }
+    }
+
+    pub fn cache_ttl(&self) -> Option<Duration> {
+        if self.opts.cache_seconds > 0 {
+            Some(Duration::from_secs(self.opts.cache_seconds))
+        } else {
+            None
+        }
     }
 
     pub fn cron(&self) -> &str {
@@ -53,25 +68,46 @@ impl Cdu {
 
         debug!("public IPv4 address: {}", &ip_address);
 
-        let params = ListZones {
-            params: ListZonesParams {
-                name: Some(self.opts.zone.clone()),
-                ..Default::default()
-            },
+        let zone_id = match self.cache.lock().unwrap().get(&self.opts.zone) {
+            Some(id) => {
+                debug!("zone found in cache: {} ({})", &self.opts.zone, &id);
+                id.clone()
+            }
+            None => {
+                let params = ListZones {
+                    params: ListZonesParams {
+                        name: Some(self.opts.zone.clone()),
+                        ..Default::default()
+                    },
+                };
+                let res: ApiSuccess<Vec<Zone>> = client.request(&params).await?;
+                let id = match res.result.first() {
+                    Some(zone) => zone.id.to_string(),
+                    None => bail!("zone not found: {}", self.opts.zone),
+                };
+                if let Some(ttl) = self.cache_ttl() {
+                    let mut cache = self.cache.lock().unwrap();
+                    cache.insert(self.opts.zone.clone(), id.clone(), ttl);
+                }
+                debug!(
+                    "zone fetched from Cloudflare: {} ({})",
+                    &self.opts.zone, &id
+                );
+                id
+            }
         };
-        let res: ApiSuccess<Vec<Zone>> = client.request(&params).await?;
-        let zone_id = match res.result.first() {
-            Some(zone) => zone.id.to_string(),
-            None => bail!("zone not found: {}", self.opts.zone),
-        };
-
-        debug!("zone found: {} ({})", &self.opts.zone, &zone_id);
 
         let mut tasks = vec![];
         for record_name in self.opts.record_name_list() {
             let client = client.clone();
             let zone_id = zone_id.clone();
+            let cache = self.cache.clone();
+            let cache_ttl = self.cache_ttl();
             tasks.push(tokio::spawn(async move {
+                if let Some(id) = cache.lock().unwrap().get(&record_name) {
+                    debug!("record found in cache: {} ({})", &record_name, &id);
+                    return Ok((id.clone(), record_name));
+                }
                 let params = ListDnsRecords {
                     zone_identifier: &zone_id,
                     params: ListDnsRecordsParams {
@@ -80,12 +116,18 @@ impl Cdu {
                     },
                 };
                 let res: ApiSuccess<Vec<DnsRecord>> = client.request(&params).await?;
-                let dns_record = match res.result.first() {
-                    Some(dns_record) => dns_record,
+                let id = match res.result.first() {
+                    Some(dns_record) => dns_record.id.clone(),
                     None => bail!("DNS record not found: {}", record_name),
                 };
-                debug!("DNS record found: {} ({})", &record_name, &dns_record.id);
-                Ok((dns_record.id.clone(), record_name))
+                if let Some(ttl) = cache_ttl {
+                    cache
+                        .lock()
+                        .unwrap()
+                        .insert(record_name.clone(), id.clone(), ttl);
+                }
+                debug!("record fetched from Cloudflare: {} ({})", &record_name, &id);
+                Ok((id, record_name))
             }));
         }
 

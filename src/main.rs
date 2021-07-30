@@ -16,10 +16,10 @@ use cdu::{Cdu, Opts, PublicIPError};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let opts: Opts = Opts::from_args();
-    let context = Arc::new(Cdu::new(opts));
 
+    let cdu = Cdu::new(opts);
     if env::var_os("RUST_LOG").is_none() {
-        if context.is_debug() {
+        if cdu.is_debug() {
             env::set_var("RUST_LOG", "cdu=debug");
         } else {
             env::set_var("RUST_LOG", "cdu=info");
@@ -28,18 +28,18 @@ async fn main() -> anyhow::Result<()> {
 
     pretty_env_logger::init();
 
-    if context.is_daemon() {
-        run_daemon(context).await?;
+    if cdu.is_daemon() {
+        run_daemon(cdu).await?;
     } else {
-        context.run().await?;
+        cdu.run().await?;
     }
 
     Ok(())
 }
 
-async fn run_daemon(context: Arc<Cdu>) -> anyhow::Result<()> {
-    let schedule = Schedule::from_str(context.cron())?;
-
+async fn run_daemon(cdu: Cdu) -> anyhow::Result<()> {
+    let cdu = Arc::new(cdu);
+    let schedule = Schedule::from_str(cdu.cron())?;
     for datetime in schedule.upcoming(chrono::Utc) {
         info!("update DNS records at {}", datetime);
 
@@ -52,15 +52,14 @@ async fn run_daemon(context: Arc<Cdu>) -> anyhow::Result<()> {
         }
 
         let strategy = ExponentialBackoff::from_millis(10).map(jitter).take(3);
+        let cdu = cdu.clone();
         let instant = Instant::now();
-        let context = context.clone();
         tokio_retry::RetryIf::spawn(
             strategy,
-            || context.run(),
+            || cdu.run(),
             |e: &anyhow::Error| e.is::<ApiFailure>() || e.is::<PublicIPError>(),
         )
         .await?;
-
         let duration = Instant::now() - instant;
         info!("done in {}ms", duration.as_millis());
     }

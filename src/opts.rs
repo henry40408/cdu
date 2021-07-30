@@ -21,6 +21,9 @@ pub struct Opts {
     /// Cron. Only in effect in daemon mode
     #[structopt(short, long, default_value = "0 */5 * * * * *", env = "CRON")]
     pub(crate) cron: String,
+    /// Cache duration in seconds, give 0 to disable
+    #[structopt(short = "s", long, default_value = "0", env = "CACHE_SECONDS")]
+    pub(crate) cache_seconds: u64,
 }
 
 impl Opts {
