@@ -4,6 +4,11 @@
 
 **C**loudflare **D**NS record **U**pdate
 
+## Features
+
+* A standalone daemon to update DNS records on Cloudflare with cron
+* A CLI to update DNS records once
+
 ## Usage
 
 Run as Docker container:
@@ -18,7 +23,7 @@ $ docker run -it \
   /cdu
 ```
 
-Run directly:
+Run as daemon:
 
 ```bash
 CLOUDFLARE_TOKEN=[your Cloudflare token] \
@@ -27,7 +32,7 @@ CLOUDFLARE_RECORDS=[name of DNS records on Cloudflare, separated by comma] \
 cargo run -- --daemon true
 ```
 
-Run once:
+Run as CLI:
 
 ```bash
 CLOUDFLARE_TOKEN=[your Cloudflare token] \
