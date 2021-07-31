@@ -8,6 +8,7 @@
 
 * A standalone daemon to update DNS records on Cloudflare with cron
 * A CLI to update DNS records once
+* Cache zone and DNS record identifier for designated time span
 
 ## Usage
 
