@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use cloudflare::endpoints::dns::{
@@ -19,9 +19,12 @@ use crate::{Opts, PublicIPError};
 
 const HTTP_TIMEOUT: u64 = 30;
 
+const ZONE: u8 = 1;
+const RECORD: u8 = 2;
+
 pub struct Cdu {
     opts: Opts,
-    cache: Arc<Mutex<TtlCache<String, String>>>,
+    cache: Arc<Mutex<TtlCache<(u8, String), String>>>,
 }
 
 impl Cdu {
@@ -54,6 +57,44 @@ impl Cdu {
         self.opts.daemon
     }
 
+    async fn get_zone_identifier(&self, client: Arc<Client>) -> anyhow::Result<String> {
+        if let Some(id) = self
+            .cache
+            .lock()
+            .unwrap()
+            .get(&(ZONE, self.opts.zone.clone()))
+        {
+            debug!("zone found in cache: {} ({})", &self.opts.zone, &id);
+            return Ok(id.clone());
+        }
+
+        let params = ListZones {
+            params: ListZonesParams {
+                name: Some(self.opts.zone.clone()),
+                ..Default::default()
+            },
+        };
+
+        let instant = Instant::now();
+        let res: ApiSuccess<Vec<Zone>> = client.request(&params).await?;
+        let duration = Instant::now() - instant;
+        debug!("took {}ms to fetch zone identifier", duration.as_millis());
+
+        let id = match res.result.first() {
+            Some(zone) => zone.id.to_string(),
+            None => bail!("zone not found: {}", self.opts.zone),
+        };
+        if let Some(ttl) = self.cache_ttl() {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert((ZONE, self.opts.zone.clone()), id.clone(), ttl);
+        }
+        debug!(
+            "zone fetched from Cloudflare: {} ({})",
+            &self.opts.zone, &id
+        );
+        Ok(id)
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
         let ip_address = public_ip::addr_v4().await.ok_or(PublicIPError)?;
 
@@ -68,34 +109,7 @@ impl Cdu {
 
         debug!("public IPv4 address: {}", &ip_address);
 
-        let zone_id = match self.cache.lock().unwrap().get(&self.opts.zone) {
-            Some(id) => {
-                debug!("zone found in cache: {} ({})", &self.opts.zone, &id);
-                id.clone()
-            }
-            None => {
-                let params = ListZones {
-                    params: ListZonesParams {
-                        name: Some(self.opts.zone.clone()),
-                        ..Default::default()
-                    },
-                };
-                let res: ApiSuccess<Vec<Zone>> = client.request(&params).await?;
-                let id = match res.result.first() {
-                    Some(zone) => zone.id.to_string(),
-                    None => bail!("zone not found: {}", self.opts.zone),
-                };
-                if let Some(ttl) = self.cache_ttl() {
-                    let mut cache = self.cache.lock().unwrap();
-                    cache.insert(self.opts.zone.clone(), id.clone(), ttl);
-                }
-                debug!(
-                    "zone fetched from Cloudflare: {} ({})",
-                    &self.opts.zone, &id
-                );
-                id
-            }
-        };
+        let zone_id = self.get_zone_identifier(client.clone()).await?;
 
         let mut tasks = vec![];
         for record_name in self.opts.record_name_list() {
@@ -104,7 +118,7 @@ impl Cdu {
             let cache = self.cache.clone();
             let cache_ttl = self.cache_ttl();
             tasks.push(tokio::spawn(async move {
-                if let Some(id) = cache.lock().unwrap().get(&record_name) {
+                if let Some(id) = cache.lock().unwrap().get(&(RECORD, record_name.clone())) {
                     debug!("record found in cache: {} ({})", &record_name, &id);
                     return Ok((id.clone(), record_name));
                 }
@@ -124,7 +138,7 @@ impl Cdu {
                     cache
                         .lock()
                         .unwrap()
-                        .insert(record_name.clone(), id.clone(), ttl);
+                        .insert((RECORD, record_name.clone()), id.clone(), ttl);
                 }
                 debug!("record fetched from Cloudflare: {} ({})", &record_name, &id);
                 Ok((id, record_name))
@@ -132,10 +146,16 @@ impl Cdu {
         }
 
         let mut dns_record_ids = vec![];
+        let instant = Instant::now();
         for task in futures::future::join_all(tasks).await {
             let (dns_record_id, record_name) = task??;
             dns_record_ids.push((dns_record_id, record_name));
         }
+        let duration = Instant::now() - instant;
+        debug!(
+            "took {}ms to fetch record identifiers",
+            duration.as_millis()
+        );
 
         let mut tasks: Vec<JoinHandle<anyhow::Result<(String, String, String)>>> = vec![];
         for (dns_record_id, record_name) in dns_record_ids {
@@ -165,10 +185,13 @@ impl Cdu {
             }));
         }
 
+        let instant = Instant::now();
         for task in futures::future::join_all(tasks).await {
             let (r, d, c) = task??;
             debug!("DNS record updated: {} ({}) -> {}", &r, &d, &c);
         }
+        let duration = Instant::now() - instant;
+        debug!("took {}ms to update DNS records", duration.as_millis());
 
         Ok(())
     }
