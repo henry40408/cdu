@@ -11,7 +11,7 @@ use cloudflare::framework::async_api::{ApiClient, Client};
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::response::ApiSuccess;
 use cloudflare::framework::{Environment, HttpApiClientConfig};
-use log::debug;
+use log::{debug, info};
 use tokio::task::JoinHandle;
 use ttl_cache::TtlCache;
 
@@ -57,7 +57,7 @@ impl Cdu {
         self.opts.daemon
     }
 
-    async fn get_zone_identifier(&self, client: Arc<Client>) -> anyhow::Result<String> {
+    async fn get_zone_identifier(&self, client: Arc<Client>) -> anyhow::Result<(Duration, String)> {
         if let Some(id) = self
             .cache
             .lock()
@@ -65,7 +65,7 @@ impl Cdu {
             .get(&(ZONE, self.opts.zone.clone()))
         {
             debug!("zone found in cache: {} ({})", &self.opts.zone, &id);
-            return Ok(id.clone());
+            return Ok((Duration::from_millis(0), id.clone()));
         }
 
         let params = ListZones {
@@ -92,7 +92,7 @@ impl Cdu {
             "zone fetched from Cloudflare: {} ({})",
             &self.opts.zone, &id
         );
-        Ok(id)
+        Ok((duration, id))
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -109,7 +109,7 @@ impl Cdu {
 
         debug!("public IPv4 address: {}", &ip_address);
 
-        let zone_id = self.get_zone_identifier(client.clone()).await?;
+        let (duration1, zone_id) = self.get_zone_identifier(client.clone()).await?;
 
         let mut tasks = vec![];
         for record_name in self.opts.record_name_list() {
@@ -151,10 +151,10 @@ impl Cdu {
             let (dns_record_id, record_name) = task??;
             dns_record_ids.push((dns_record_id, record_name));
         }
-        let duration = Instant::now() - instant;
+        let duration2 = Instant::now() - instant;
         debug!(
             "took {}ms to fetch record identifiers",
-            duration.as_millis()
+            duration2.as_millis()
         );
 
         let mut tasks: Vec<JoinHandle<anyhow::Result<(String, String, String)>>> = vec![];
@@ -190,8 +190,11 @@ impl Cdu {
             let (r, d, c) = task??;
             debug!("DNS record updated: {} ({}) -> {}", &r, &d, &c);
         }
-        let duration = Instant::now() - instant;
-        debug!("took {}ms to update DNS records", duration.as_millis());
+        let duration3 = Instant::now() - instant;
+        debug!("took {}ms to update DNS records", duration3.as_millis());
+
+        info!("took {}ms to fetch zone record, {}ms to fetch DNS records, and {}ms to update DNS records", duration1.as_millis(),
+        duration2.as_millis(),duration3.as_millis());
 
         Ok(())
     }
